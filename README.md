@@ -86,8 +86,10 @@ it up on its own, or point at it explicitly:
 ./crowdin-export --token <token> --lang zh-CN          # or $CROWDIN_TOKEN
 ```
 
-Tokens speak to the public API at `https://api.crowdin.com/api/v2` and stay
-valid until revoked.
+Tokens speak to the public API at `https://api.crowdin.com/api/v2` and keep
+working until they expire (the date is picked when you create one) or are
+revoked. Either way a refused credential stops the run with a 401/403 message
+and status 1 - nothing is written.
 
 **Session cookies.** Export the cookies of a logged-in crowdin.com session in
 Netscape format (for example with a “Get cookies.txt” browser extension) and

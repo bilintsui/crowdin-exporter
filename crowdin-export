@@ -122,6 +122,14 @@ def report_cookie_lifetime(expiry, warn_below=600):
 # Crowdin REST client
 # --------------------------------------------------------------------------
 
+def api_error_message(error):
+    """The message Crowdin puts in the body of an HTTP error, if there is one."""
+    try:
+        return (json.loads(error.read().decode("utf-8")).get("error") or {}).get("message") or ""
+    except Exception:
+        return ""
+
+
 class Crowdin:
     def __init__(self, token, jobs=12, verbose=True, base=API_BASE):
         self.token = token
@@ -145,17 +153,23 @@ class Crowdin:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as error:
                 last_error = error
+                detail = api_error_message(error)
                 if error.code == 401:
                     raise CrowdinError(
-                        "Crowdin rejected the credentials (HTTP 401).\n"
-                        "a session cookie only lives for an hour, and a personal access token\n"
-                        "can be revoked or lack the scopes the export needs")
+                        "Crowdin rejected the credentials (HTTP 401)%s\n"
+                        "- token: check on crowdin.com under Settings -> API that it has not\n"
+                        "  expired and that it carries the Projects, Source files & strings,\n"
+                        "  Translations and Translation status scopes\n"
+                        "- cookies: a session only lives for an hour, log in again and export\n"
+                        "  the cookies once more" % (": " + detail if detail else ""))
                 if error.code == 403:
                     raise CrowdinError(
-                        "Crowdin denied access (HTTP 403) to %s\n"
-                        "with a personal access token this usually means a missing scope: the\n"
-                        "export needs Projects, Source files & strings, Translations and\n"
-                        "Translation status, all read only" % path)
+                        "Crowdin denied access (HTTP 403) to %s%s\n"
+                        "- a token needs the Projects, Source files & strings, Translations\n"
+                        "  and Translation status scopes (read only), and \"Endpoint isn't\n"
+                        "  allowed for token scopes\" means one of them is missing\n"
+                        "- \"Forbidden\" means the project role lacks the right instead"
+                        % (path, ": " + detail if detail else ""))
                 if error.code == 404:
                     raise CrowdinError("not found (HTTP 404): %s" % path)
                 if error.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
@@ -554,7 +568,8 @@ def main(argv=None):
                          "or set CROWDIN_TOKEN")
 
         if verbose and base == API_BASE_TOKEN:
-            print("token     : personal access token (long lived, no expiry to check)", file=sys.stderr)
+            print("token     : personal access token (its expiry, if any, is set on crowdin.com)",
+                  file=sys.stderr)
 
         api = Crowdin(token, jobs=max(1, args.jobs), verbose=verbose, base=args.api_base or base)
         project = resolve_project(api, args.project)
