@@ -73,6 +73,27 @@ def jwt_expiry(token):
         return None
 
 
+def format_duration(seconds):
+    """A short 'how much longer' string: 45s, 12m, 1h 20m."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "%ds" % seconds
+    if seconds < 3600:
+        return "%dm" % (seconds // 60)
+    return "%dh %02dm" % (seconds // 3600, (seconds % 3600) // 60)
+
+
+def report_cookie_lifetime(expiry, warn_below=600):
+    """Say how long the session token is still good for, before any waiting."""
+    remaining = expiry - time.time()
+    print("cookies   : session token valid for another %s (expires %s UTC)"
+          % (format_duration(remaining), time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(expiry))),
+          file=sys.stderr)
+    if remaining < warn_below:
+        print("warning   : a full export takes about a minute; refresh the cookies "
+              "if this run may outlast the token", file=sys.stderr)
+
+
 # --------------------------------------------------------------------------
 # Crowdin REST client
 # --------------------------------------------------------------------------
@@ -354,6 +375,8 @@ def main(argv=None):
                 "the Crowdin session cookie expired at %s UTC\n"
                 "log in to crowdin.com again and re-export the cookies"
                 % time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(expiry)))
+        if verbose and expiry:
+            report_cookie_lifetime(expiry)
 
         api = Crowdin(token, jobs=max(1, args.jobs), verbose=verbose)
         project = resolve_project(api, args.project)

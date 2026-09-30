@@ -61,8 +61,16 @@ a “Get cookies.txt” browser extension) and pass the file to `--cookies`; the
 deliberately no default path, so the file is never picked up by accident. Any
 file with a `token` line for a `crowdin.com` domain works.
 
-That token is a short-lived JWT (a few hours). When it expires the tool says so
-and exits with status 1 — log in again and re-export the cookie file.
+That token is a short-lived JWT (a few hours). Every run starts by printing how
+long it is still good for, and adds a warning when it is about to run out:
+
+```
+cookies   : session token valid for another 1h 59m (expires 2026-09-30 12:24:33 UTC)
+warning   : a full export takes about a minute; refresh the cookies if this run may outlast the token
+```
+
+Once it has expired the tool says so and exits with status 1 — log in again and
+re-export the cookie file.
 
 The cookie file is a credential: keep it out of version control (see
 `.gitignore`) and out of shared directories.
