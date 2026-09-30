@@ -516,7 +516,8 @@ def main(argv=None):
                         help="write the source strings used by this run to FILE, ready to be "
                              "reused with --source-file")
     parser.add_argument("--refresh", action="store_true",
-                        help="ignore the cached source string list and fetch it again")
+                        help="ignore the cached source string list and fetch it again "
+                             "(same as --cache-ttl 0)")
     parser.add_argument("--cache-ttl", type=float, default=DEFAULT_CACHE_TTL / 3600.0,
                         metavar="HOURS",
                         help="how long a cached source string list may be reused, in hours; "
