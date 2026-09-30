@@ -367,19 +367,26 @@ def main(argv=None):
 
         language = normalise_language(args.lang, project)
 
+        out_path = args.out if args.out is not None else output_name(language)
+        if out_path != "-" and not os.path.isdir(os.path.dirname(os.path.abspath(out_path))):
+            raise CrowdinError("output directory does not exist: %s"
+                               % os.path.dirname(os.path.abspath(out_path)))
+
         file_info = pick_file(api, project_id, args.file)
         result, stats = export(api, project, file_info, language, args.top_voted, verbose)
 
         if args.sort:
             result = {key: result[key] for key in sorted(result)}
 
-        out_path = args.out if args.out is not None else output_name(language)
         payload = render(result, args.indent)
-        if out_path == "-":
-            sys.stdout.write(payload)
-        else:
-            with open(out_path, "w", encoding="utf-8", newline="") as fh:
-                fh.write(payload)
+        try:
+            if out_path == "-":
+                sys.stdout.write(payload)
+            else:
+                with open(out_path, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(payload)
+        except OSError as error:
+            raise CrowdinError("cannot write %s: %s" % (out_path, error.strerror or error))
 
         if verbose:
             print("project   : %s (%s)" % (project["name"], project_id), file=sys.stderr)
