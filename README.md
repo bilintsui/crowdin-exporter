@@ -50,6 +50,10 @@ which is what the not-yet-proofread part of a language looks like.
 | `--indent` | JSON indentation: 4 like the localisation files from the asset server, 2 like `en_us.json` inside `client.jar` |
 | `--sort` | sort keys byte-wise instead of keeping the source file order |
 | `--jobs`, `-j` | parallel API requests, at most 20 (default: 16) |
+| `--source-file` | reuse the source strings (keys, English text, string ids) from a file instead of fetching them |
+| `--save-source` | write the source strings used by this run to a file, ready for `--source-file` |
+| `--refresh` | ignore the cached source strings and fetch them again |
+| `--cache-ttl` | hours a cached source list may be reused (default: 12, `0` disables the cache) |
 | `--list-languages` | print the project's languages and exit |
 | `--quiet`, `-q` | no progress output |
 
@@ -98,6 +102,32 @@ re-export the cookie file.
 
 Either credential is a secret: keep it out of version control (see
 `.gitignore`) and out of shared directories.
+
+## Source strings
+
+Every run needs the project's source strings: they carry the key names, the
+English text used when a translation is missing, and - crucially - the
+`stringId` that the translation and approval endpoints are keyed by. Fetching
+them means paging through all ~8 500 strings and takes about 90 of the ~110
+seconds a cold run costs, so the tool caches them:
+
+* by default in `${XDG_CACHE_HOME:-~/.cache}/crowdin-exporter/strings-<project>-<file>.json`,
+  reused for up to `--cache-ttl` hours (12 by default) after two cheap probes
+  confirm that no string was added; `--refresh` fetches them again;
+* or in a file of your own, which is handy when you export several languages in
+  a row or want one file per game snapshot:
+
+  ```
+  ./crowdin-export --lang en-US --refresh --save-source en_us.source.json
+  ./crowdin-export --lang zh-CN --source-file en_us.source.json
+  ./crowdin-export --lang zh-TW --source-file en_us.source.json
+  ```
+
+  A warm run takes about 25 seconds instead of 110.
+
+Note that a plain exported language file (`en_us.base.*.json`, in game format)
+is *not* enough for `--source-file`, because it has no string ids; the file
+written by `--save-source` is the same data plus those ids.
 
 ## Output format
 

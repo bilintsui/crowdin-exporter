@@ -31,6 +31,9 @@ API_BASE_TOKEN = "https://api.crowdin.com/api/v2"   # personal access token (pub
 PAGE_SIZE = 250          # 500 is allowed but each page then costs ~40s server side
 DEFAULT_JOBS = 16        # Crowdin allows 20 concurrent requests per account
 DEFAULT_PROJECT = "minecraft"
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+                         "crowdin-exporter")
+DEFAULT_CACHE_TTL = 12 * 3600   # seconds a cached source string list may be reused
 DEFAULT_TOKEN_FILE = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
     "crowdin-exporter", "token")
@@ -248,6 +251,121 @@ def render(result, indent):
 
 
 # --------------------------------------------------------------------------
+# source string cache
+# --------------------------------------------------------------------------
+
+def source_cache_path(project_id, file_id):
+    return os.path.join(CACHE_DIR, "strings-%s-%s.json" % (project_id, file_id))
+
+
+def cache_age(entry):
+    return time.time() - entry.get("fetched_at", 0)
+
+
+def load_source_cache(project_id, file_id, ttl, api, verbose):
+    """Return the cached string list when it is still trustworthy, else None.
+
+    Two cheap probes guard against the usual change - new strings being added
+    to the source file - while the TTL covers edits to existing ones.
+    """
+    path = source_cache_path(project_id, file_id)
+    if ttl <= 0 or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            entry = json.load(fh)
+        strings = entry["strings"]
+        assert strings and all({"id", "identifier", "text"} <= set(s) for s in strings[:1])
+    except (OSError, ValueError, KeyError, AssertionError):
+        return None
+    if cache_age(entry) > ttl:
+        return None
+
+    first = api.get("/projects/%s/strings" % project_id,
+                    {"fileId": file_id, "limit": 1, "offset": 0})["data"]
+    if not first or first[0]["data"]["id"] != strings[0]["id"]:
+        if verbose:
+            print("source    : cache stale (first string changed), refetching", file=sys.stderr)
+        return None
+    beyond = api.get("/projects/%s/strings" % project_id,
+                     {"fileId": file_id, "limit": 1, "offset": len(strings)})["data"]
+    if beyond:
+        if verbose:
+            print("source    : cache stale (%d new strings), refetching" % len(beyond), file=sys.stderr)
+        return None
+    if verbose:
+        print("source    : reusing %d cached strings (%.1f h old)"
+              % (len(strings), cache_age(entry) / 3600), file=sys.stderr)
+    return strings
+
+
+def save_source_cache(project_id, file_id, strings):
+    path = source_cache_path(project_id, file_id)
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"fetched_at": time.time(), "strings": strings}, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def read_source_list(path):
+    """Read a source string list previously written by --save-source."""
+    if not os.path.isfile(path):
+        raise CrowdinError("source file not found: %s" % path)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except ValueError as error:
+        raise CrowdinError("source file is not valid JSON: %s (%s)" % (path, error))
+    strings = data.get("strings") if isinstance(data, dict) else None
+    if not strings:
+        raise CrowdinError(
+            "source file %s has no string ids - it looks like a plain language file.\n"
+            "create a reusable one with: crowdin-export --lang <source language> "
+            "--refresh --save-source %s" % (path, path))
+    return strings
+
+
+def write_source_list(path, strings, fetched_at=None):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"fetched_at": fetched_at or time.time(), "strings": strings},
+                  fh, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def load_strings(api, project_id, file_info, verbose, refresh, cache_ttl,
+                 source_file=None, save_source=None):
+    file_id = file_info["id"]
+    if source_file:
+        strings = read_source_list(source_file)
+        if verbose:
+            print("source    : %d strings from %s" % (len(strings), source_file), file=sys.stderr)
+        if save_source and os.path.abspath(save_source) != os.path.abspath(source_file):
+            write_source_list(save_source, strings)
+        return strings
+    if not refresh:
+        cached = load_source_cache(project_id, file_id, cache_ttl, api, verbose)
+        if cached is not None:
+            return cached
+    if verbose:
+        print("strings   : fetching %s" % file_info["path"], file=sys.stderr)
+    strings = sorted((entry["data"] for entry in
+                      api.get_all("/projects/%s/strings" % project_id,
+                                  {"fileId": file_id}, label="strings")),
+                     key=lambda s: s["id"])
+    save_source_cache(project_id, file_id, strings)
+    if save_source:
+        write_source_list(save_source, strings)
+        if verbose:
+            print("source    : saved %d strings to %s" % (len(strings), save_source), file=sys.stderr)
+    return strings
+
+
+# --------------------------------------------------------------------------
 # export
 # --------------------------------------------------------------------------
 
@@ -288,18 +406,15 @@ def pick_file(api, project_id, requested):
     return files[0]
 
 
-def export(api, project, file_info, language, top_voted, verbose=True):
+def export(api, project, file_info, language, top_voted, verbose=True,
+           refresh=False, cache_ttl=DEFAULT_CACHE_TTL, source_file=None, save_source=None):
     project_id = project["id"]
     file_id = file_info["id"]
     source_language = project["sourceLanguageId"]
     is_source = language == source_language
 
-    if verbose:
-        print("strings   : fetching %s" % file_info["path"], file=sys.stderr)
-    strings = sorted((entry["data"] for entry in
-                      api.get_all("/projects/%s/strings" % project_id,
-                                  {"fileId": file_id}, label="strings")),
-                     key=lambda s: s["id"])
+    strings = load_strings(api, project_id, file_info, verbose, refresh, cache_ttl,
+                           source_file, save_source)
 
     translations, approvals = {}, {}
     if not is_source:
@@ -393,6 +508,20 @@ def main(argv=None):
                         help="parallel API requests, at most 20 (default: %d)" % DEFAULT_JOBS)
     parser.add_argument("--list-languages", action="store_true",
                         help="print the project's target languages and exit")
+    parser.add_argument("--source-file", metavar="FILE",
+                        help="reuse the source strings (keys, English text and string ids) "
+                             "from FILE instead of fetching them; such a file is written by "
+                             "--save-source")
+    parser.add_argument("--save-source", metavar="FILE",
+                        help="write the source strings used by this run to FILE, ready to be "
+                             "reused with --source-file")
+    parser.add_argument("--refresh", action="store_true",
+                        help="ignore the cached source string list and fetch it again")
+    parser.add_argument("--cache-ttl", type=float, default=DEFAULT_CACHE_TTL / 3600.0,
+                        metavar="HOURS",
+                        help="how long a cached source string list may be reused "
+                             "(default: %.0f, 0 disables the cache)"
+                             % (DEFAULT_CACHE_TTL / 3600.0))
     parser.add_argument("--api-base", default=None,
                         help="override the API endpoint (default: %s for a token, %s for cookies)"
                              % (API_BASE_TOKEN, API_BASE))
@@ -444,7 +573,9 @@ def main(argv=None):
                                % os.path.dirname(os.path.abspath(out_path)))
 
         file_info = pick_file(api, project_id, args.file)
-        result, stats = export(api, project, file_info, language, args.top_voted, verbose)
+        result, stats = export(api, project, file_info, language, args.top_voted, verbose,
+                               refresh=args.refresh, cache_ttl=max(0.0, args.cache_ttl) * 3600.0,
+                               source_file=args.source_file, save_source=args.save_source)
 
         if args.sort:
             result = {key: result[key] for key in sorted(result)}
