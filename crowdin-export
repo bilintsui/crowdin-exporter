@@ -399,7 +399,7 @@ def main(argv=None):
                 print("top-voted : %d" % stats["top_voted"], file=sys.stderr)
             print("source    : %d" % stats["source"], file=sys.stderr)
             if stats["translated_unapproved"] and not args.top_voted:
-                print("note      : %d strings have a translation that is not approved yet;"
+                print("note      : %d string(s) have a translation that is not approved yet;"
                       " pass --top-voted to use it" % stats["translated_unapproved"], file=sys.stderr)
             if out_path != "-":
                 print("written   : %s (%d entries)" % (out_path, len(result)), file=sys.stderr)
