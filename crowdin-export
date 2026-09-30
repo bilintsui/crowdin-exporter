@@ -519,8 +519,8 @@ def main(argv=None):
                         help="ignore the cached source string list and fetch it again")
     parser.add_argument("--cache-ttl", type=float, default=DEFAULT_CACHE_TTL / 3600.0,
                         metavar="HOURS",
-                        help="how long a cached source string list may be reused "
-                             "(default: %.0f, 0 disables the cache)"
+                        help="how long a cached source string list may be reused, in hours; "
+                             "0 always fetches it again (default: %.0f)"
                              % (DEFAULT_CACHE_TTL / 3600.0))
     parser.add_argument("--api-base", default=None,
                         help="override the API endpoint (default: %s for a token, %s for cookies)"

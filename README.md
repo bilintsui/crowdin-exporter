@@ -53,7 +53,7 @@ which is what the not-yet-proofread part of a language looks like.
 | `--source-file` | reuse the source strings (keys, English text, string ids) from a file instead of fetching them |
 | `--save-source` | write the source strings used by this run to a file, ready for `--source-file` |
 | `--refresh` | ignore the cached source strings and fetch them again |
-| `--cache-ttl` | hours a cached source list may be reused (default: 12, `0` disables the cache) |
+| `--cache-ttl` | hours a cached source list may be reused; `0` always fetches it again (default: 12) |
 | `--list-languages` | print the project's languages and exit |
 | `--quiet`, `-q` | no progress output |
 
@@ -113,7 +113,8 @@ seconds a cold run costs, so the tool caches them:
 
 * by default in `${XDG_CACHE_HOME:-~/.cache}/crowdin-exporter/strings-<project>-<file>.json`,
   reused for up to `--cache-ttl` hours (12 by default) after two cheap probes
-  confirm that no string was added; `--refresh` fetches them again;
+  confirm that no string was added; `--refresh` fetches them again, and
+  `--cache-ttl 0` always fetches them again while still refreshing the file;
 * or in a file of your own, which is handy when you export several languages in
   a row or want one file per game snapshot:
 
