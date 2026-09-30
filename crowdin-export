@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""Export one language of a Crowdin project as a game-style language JSON file.
+
+By default a string is exported only when its translation is approved; strings
+without an approved translation keep the source (English) text. With
+--top-voted, such strings are filled in with the top-voted (not yet approved)
+translation that Crowdin currently shows for them.
+
+Authentication is read from a Netscape-format cookie file (the one the browser
+saves for crowdin.com); the "token" cookie holds the session JWT that the API
+accepts as a bearer token.
+
+This script is licensed with CC0 1.0 Universal, see full text in LICENSE.
+"""
+
+import argparse
+import base64
+import json
+import os
+import random
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+API_BASE = "https://crowdin.com/api/v2"
+PAGE_SIZE = 250          # 500 is allowed but each page then costs ~40s server side
+DEFAULT_JOBS = 16        # Crowdin allows 20 concurrent requests per account
+DEFAULT_PROJECT = "minecraft"
+
+
+class CrowdinError(Exception):
+    """Fatal error reported to the user without a traceback."""
+
+
+# --------------------------------------------------------------------------
+# authentication
+# --------------------------------------------------------------------------
+
+def read_token(cookies_path):
+    """Return the Crowdin session JWT from a Netscape cookie file."""
+    if not os.path.isfile(cookies_path):
+        raise CrowdinError("cookie file not found: %s" % cookies_path)
+
+    token = None
+    with open(cookies_path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") and not line.startswith("#HttpOnly_"):
+                continue
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+            fields = line.split("\t")
+            if len(fields) >= 7 and fields[5] == "token" and "crowdin" in fields[0]:
+                token = fields[6]
+    if not token:
+        raise CrowdinError(
+            "no 'token' cookie for crowdin.com in %s\n"
+            "log in to crowdin.com in a browser and export the cookies again" % cookies_path)
+    return token
+
+
+def jwt_expiry(token):
+    """Return the 'exp' claim of a JWT, or None if it cannot be read."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------
+# Crowdin REST client
+# --------------------------------------------------------------------------
+
+class Crowdin:
+    def __init__(self, token, jobs=12, verbose=True):
+        self.token = token
+        self.jobs = jobs
+        self.verbose = verbose
+
+    def _request(self, path, params=None, tries=6):
+        url = API_BASE + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        last_error = None
+        for attempt in range(tries):
+            request = urllib.request.Request(url, headers={
+                "Authorization": "Bearer " + self.token,
+                "Accept": "application/json",
+                "User-Agent": "crowdin-export",
+            })
+            try:
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                last_error = error
+                if error.code == 401:
+                    raise CrowdinError(
+                        "Crowdin rejected the token (HTTP 401) - the cookie has expired.\n"
+                        "log in to crowdin.com again and re-export the cookies.")
+                if error.code == 403:
+                    raise CrowdinError("Crowdin denied access (HTTP 403) to %s" % path)
+                if error.code == 404:
+                    raise CrowdinError("not found (HTTP 404): %s" % path)
+                if error.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
+                    time.sleep(min(30, 2 ** attempt) + random.random())
+                    continue
+                raise CrowdinError("HTTP %d from %s" % (error.code, url))
+            except Exception as error:  # network hiccup
+                last_error = error
+                if attempt < tries - 1:
+                    time.sleep(min(30, 2 ** attempt) + random.random())
+                    continue
+                raise CrowdinError("request failed: %s (%s)" % (url, error))
+        raise CrowdinError("request failed: %s (%s)" % (url, last_error))
+
+    def get(self, path, params=None):
+        return self._request(path, params)
+
+    def get_all(self, path, params=None, label=None):
+        """Fetch every page of a list endpoint, a page batch at a time."""
+        params = dict(params or {})
+        params["limit"] = PAGE_SIZE
+        collected = []
+        offset = 0
+        while True:
+            offsets = [offset + i * PAGE_SIZE for i in range(self.jobs)]
+            with ThreadPoolExecutor(self.jobs) as pool:
+                pages = list(pool.map(
+                    lambda off: self.get(path, dict(params, offset=off)), offsets))
+            stop = False
+            for page in pages:
+                collected.extend(page.get("data") or [])
+                if len(page.get("data") or []) < PAGE_SIZE:
+                    stop = True
+                    break
+            if self.verbose and label:
+                print("  %s: %d" % (label, len(collected)), file=sys.stderr, flush=True)
+            if stop:
+                break
+            offset += PAGE_SIZE * self.jobs
+        return collected
+
+
+# --------------------------------------------------------------------------
+# data helpers
+# --------------------------------------------------------------------------
+
+def normalise_language(requested, project):
+    """Map a user supplied language code onto one of the project's languages."""
+    targets = list(project.get("targetLanguageIds") or [])
+    source = project.get("sourceLanguageId")
+    known = targets + ([source] if source else [])
+    if requested in known:
+        return requested
+
+    def squeeze(code):  # zh_cn / zh-cn / zhCN -> zhcn
+        return re.sub(r"[-_]", "", code).lower()
+
+    for matches in (lambda code: code.lower() == requested.lower(),
+                    lambda code: code.lower().replace("-", "_") == requested.replace("-", "_").lower(),
+                    lambda code: squeeze(code) == squeeze(requested)):
+        for code in known:
+            if matches(code):
+                return code
+
+    raise CrowdinError(
+        "unknown language %r for project %s\navailable target languages: %s"
+        % (requested, project.get("identifier"), ", ".join(sorted(targets))))
+
+
+def string_key(string):
+    """The language-file key of a Crowdin string."""
+    identifier = string.get("identifier") or ""
+    if identifier.startswith('"') and identifier.endswith('"'):
+        try:
+            return json.loads(identifier)
+        except ValueError:
+            return identifier[1:-1]
+    return identifier
+
+
+def output_name(language):
+    """Game-style file name for a language code (zh-CN -> zh_cn)."""
+    return language.replace("-", "_").lower() + ".json"
+
+
+# --------------------------------------------------------------------------
+# export
+# --------------------------------------------------------------------------
+
+def resolve_project(api, reference):
+    """Accept either a numeric project id or a project identifier/name."""
+    if str(reference).isdigit():
+        return api.get("/projects/%s" % reference)["data"]
+
+    wanted = str(reference).lower()
+    projects = [entry["data"] for entry in api.get_all("/projects")]
+    for project in projects:
+        if wanted in (str(project.get("identifier", "")).lower(),
+                      str(project.get("name", "")).lower()):
+            return project
+    listing = "\n".join("  %s  %s" % (p["id"], p.get("identifier")) for p in projects[:20])
+    raise CrowdinError("no project matching %r; your projects:\n%s" % (reference, listing))
+
+
+def pick_file(api, project_id, requested):
+    if requested:
+        if str(requested).isdigit():
+            return api.get("/projects/%s/files/%s" % (project_id, requested))["data"]
+        wanted = requested.strip("/")
+        for entry in api.get_all("/projects/%s/files" % project_id):
+            data = entry["data"]
+            if data["path"].strip("/") == wanted or data["name"] == wanted:
+                return data
+        raise CrowdinError("file not found in project: %s" % requested)
+
+    files = [entry["data"] for entry in api.get_all("/projects/%s/files" % project_id)]
+    if not files:
+        raise CrowdinError("project %s has no files" % project_id)
+    if len(files) > 1:
+        listing = "\n".join("  %s  %s" % (f["id"], f["path"]) for f in files[:20])
+        raise CrowdinError(
+            "project %s has %d files, pass one with --file:\n%s"
+            % (project_id, len(files), listing))
+    return files[0]
+
+
+def export(api, project, file_info, language, top_voted):
+    project_id = project["id"]
+    file_id = file_info["id"]
+    source_language = project["sourceLanguageId"]
+    is_source = language == source_language
+
+    print("strings   : fetching %s" % file_info["path"], file=sys.stderr)
+    strings = sorted((entry["data"] for entry in
+                      api.get_all("/projects/%s/strings" % project_id,
+                                  {"fileId": file_id}, label="strings")),
+                     key=lambda s: s["id"])
+
+    translations, approvals = {}, {}
+    if not is_source:
+        translations = {entry["data"]["stringId"]: entry["data"] for entry in
+                        api.get_all("/projects/%s/languages/%s/translations"
+                                    % (project_id, language),
+                                    {"fileId": file_id}, label="translations")}
+        approvals = {}
+        for entry in api.get_all("/projects/%s/approvals" % project_id,
+                                 {"fileId": file_id, "languageId": language},
+                                 label="approvals"):
+            data = entry["data"]
+            current = approvals.get(data["stringId"])
+            if current is None or data["id"] > current["id"]:
+                approvals[data["stringId"]] = data
+
+    result = {}
+    stats = {"approved": 0, "top_voted": 0, "source": 0, "translated_unapproved": 0}
+    for string in strings:
+        key = string_key(string)
+        text = string.get("text") or ""
+
+        if is_source:
+            stats["source"] += 1
+            result[key] = text
+            continue
+
+        translation = translations.get(string["id"])
+        approval = approvals.get(string["id"])
+
+        if approval is not None:
+            if translation is not None and translation["translationId"] == approval["translationId"]:
+                text = translation.get("text") or ""
+            else:
+                # the approved translation is not the one Crowdin lists as current
+                fetched = api.get("/projects/%s/translations/%s"
+                                  % (project_id, approval["translationId"]))["data"]
+                text = fetched.get("text") or ""
+            stats["approved"] += 1
+        elif translation is not None:
+            stats["translated_unapproved"] += 1
+            if top_voted:
+                text = translation.get("text") or ""
+                stats["top_voted"] += 1
+            else:
+                stats["source"] += 1
+        else:
+            stats["source"] += 1
+
+        result[key] = text
+
+    return result, stats
+
+
+# --------------------------------------------------------------------------
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="crowdin-export",
+        description="Export one language of a Crowdin project as a game-style lang JSON.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  ./crowdin-export --cookies cookies.txt --lang zh-CN
+  ./crowdin-export --cookies cookies.txt --lang zh-TW --top-voted
+  ./crowdin-export --cookies cookies.txt --lang lzh --out lzh.json
+""")
+    parser.add_argument("--lang", "-l",
+                        help="Crowdin language code to export, e.g. zh-CN, zh-TW, zh-HK, lzh")
+    parser.add_argument("--top-voted", "-t", action="store_true",
+                        help="strings without an approved translation use the top-voted "
+                             "translation instead of the source text")
+    parser.add_argument("--cookies", required=True,
+                        help="Netscape cookie file with the crowdin.com session cookies")
+    parser.add_argument("--project", default=DEFAULT_PROJECT,
+                        help="Crowdin project id or identifier (default: %s)" % DEFAULT_PROJECT)
+    parser.add_argument("--file",
+                        help="Crowdin file id or path (default: the only file of the project)")
+    parser.add_argument("--out", "-o",
+                        help="output file, '-' for stdout (default: <language>.json, e.g. zh_cn.json)")
+    parser.add_argument("--indent", type=int, default=4,
+                        help="JSON indentation (default: 4, like the game's localisation files)")
+    parser.add_argument("--sort", action="store_true",
+                        help="sort keys byte-wise instead of keeping the source file order")
+    parser.add_argument("--jobs", "-j", type=int, default=DEFAULT_JOBS,
+                        help="parallel API requests, at most 20 (default: %d)" % DEFAULT_JOBS)
+    parser.add_argument("--list-languages", action="store_true",
+                        help="print the project's target languages and exit")
+    parser.add_argument("--quiet", "-q", action="store_true", help="no progress output")
+    args = parser.parse_args(argv)
+    if not args.lang and not args.list_languages:
+        parser.error("the following arguments are required: --lang/-l")
+
+    verbose = not args.quiet
+    try:
+        token = read_token(args.cookies)
+        expiry = jwt_expiry(token)
+        if expiry and expiry < time.time():
+            raise CrowdinError(
+                "the Crowdin session cookie expired at %s UTC\n"
+                "log in to crowdin.com again and re-export the cookies"
+                % time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(expiry)))
+
+        api = Crowdin(token, jobs=max(1, args.jobs), verbose=verbose)
+        project = resolve_project(api, args.project)
+        project_id = project["id"]
+
+        if args.list_languages:
+            print("source: %s" % project["sourceLanguageId"])
+            for code in sorted(project["targetLanguageIds"]):
+                print(code)
+            return 0
+
+        language = normalise_language(args.lang, project)
+
+        file_info = pick_file(api, project_id, args.file)
+        result, stats = export(api, project, file_info, language, args.top_voted)
+
+        if args.sort:
+            result = {key: result[key] for key in sorted(result)}
+
+        out_path = args.out if args.out is not None else output_name(language)
+        payload = json.dumps(result, ensure_ascii=False, indent=args.indent)
+        if out_path == "-":
+            print(payload)
+        else:
+            with open(out_path, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+
+        if verbose:
+            print("project   : %s (%s)" % (project["name"], project_id), file=sys.stderr)
+            print("file      : %s (id %s)" % (file_info["path"], file_info["id"]), file=sys.stderr)
+            print("language  : %s%s"
+                  % (language, " (source language)" if language == project["sourceLanguageId"] else ""),
+                  file=sys.stderr)
+            print("approved  : %d" % stats["approved"], file=sys.stderr)
+            if stats["top_voted"]:
+                print("top-voted : %d" % stats["top_voted"], file=sys.stderr)
+            print("source    : %d" % stats["source"], file=sys.stderr)
+            if stats["translated_unapproved"] and not args.top_voted:
+                print("note      : %d strings have a translation that is not approved yet;"
+                      " pass --top-voted to use it" % stats["translated_unapproved"], file=sys.stderr)
+            if out_path != "-":
+                print("written   : %s (%d entries)" % (out_path, len(result)), file=sys.stderr)
+        return 0
+    except CrowdinError as error:
+        print("crowdin-export: error: %s" % error, file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

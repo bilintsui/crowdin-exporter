@@ -1,0 +1,5 @@
+# Credentials: Crowdin session cookies must never be committed
+cookies.txt
+
+# Exported language files land next to the tool (zh_cn.json, lzh.json, ...)
+/*.json
