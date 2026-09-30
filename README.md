@@ -1,8 +1,8 @@
 # crowdin-export
 
 Export **one language** of a Crowdin project as a game-style language JSON file
-(`zh_cn.json`, `lzh.json`, …), using approved translations first and falling back
-to the English source text for strings that are not approved yet.
+(`zh_cn.json`, `lzh.json`, …), using approved translations first and falling
+back to the English source text for strings that are not approved yet.
 
 ```
 ./crowdin-export --cookies cookies.txt --lang zh-CN
@@ -18,8 +18,9 @@ otherwise; `--out -` writes to stdout.
 ## Requirements
 
 * Python 3.8 or newer — no third-party packages, only the standard library.
-* Network access to `crowdin.com`.
-* A logged-in Crowdin session cookie file, see [Cookies](#cookies).
+* Network access to `crowdin.com` (or `api.crowdin.com` with a token).
+* A Crowdin personal access token or a session cookie file, see
+  [Authentication](#authentication).
 
 ## Rules
 
@@ -64,11 +65,21 @@ Either `--lang` or `--list-languages` is required.
 Two ways in, pick whichever suits you:
 
 **Personal access token (recommended).** Create one at crowdin.com →
-avatar → **Settings → API → Personal Access Tokens**, with read access to
-*Projects*, *Source files & strings*, *Translations* and *Translation status*
-(optionally restrict it to the Minecraft project under *Granular access*).
-Save it as `~/.config/crowdin-exporter/token` (`chmod 600`) and the tool picks it
-up on its own, or point at it explicitly:
+avatar → **Settings → API → Personal Access Tokens**. Under *Scopes*, set these
+to **Read only** — the first one is the entry indented under *Projects*:
+
+* **Projects (List, Get, Create, Edit)** — resolve the project and read its
+  language list; ticking the *Projects* row above it only lights that row up and
+  the API still answers `403 Endpoint isn't allowed for token scopes`;
+* **Source files & strings** — list the project files and read the source
+  strings;
+* **Translations** — read the translations;
+* **Translation status** — read the approvals, which decide what counts as
+  approved (this scope offers *Read only* by itself).
+
+Optionally restrict the token to the Minecraft project under *Granular access*.
+Save it as `~/.config/crowdin-exporter/token` (`chmod 600`) and the tool picks
+it up on its own, or point at it explicitly:
 
 ```
 ./crowdin-export --token-file ~/.config/crowdin-exporter/token --lang zh-CN
@@ -106,16 +117,17 @@ Either credential is a secret: keep it out of version control (see
 ## Source strings
 
 Every run needs the project's source strings: they carry the key names, the
-English text used when a translation is missing, and - crucially - the
+English text used when a translation is missing, and — crucially — the
 `stringId` that the translation and approval endpoints are keyed by. Fetching
 them means paging through all ~8 500 strings and takes about 90 of the ~110
 seconds a cold run costs, so the tool caches them:
 
-* by default in `${XDG_CACHE_HOME:-~/.cache}/crowdin-exporter/strings-<project>-<file>.json`,
-  reused for up to `--cache-ttl` hours (12 by default) after two cheap probes
-  confirm that no string was added; `--refresh` fetches them again - it is the
-  same as `--cache-ttl 0`, and either way the file is refreshed for the next
-  run while a stale one is simply replaced;
+* by default in `${XDG_CACHE_HOME:-~/.cache}`, as
+  `crowdin-exporter/strings-<project>-<file>.json`, reused for up to
+  `--cache-ttl` hours (12 by default) after two cheap probes confirm that no
+  string was added; `--refresh` fetches them again — it is the same as
+  `--cache-ttl 0`, and either way the file is refreshed for the next run while a
+  stale one is simply replaced;
 * or in a file of your own, which is handy when you export several languages in
   a row or want one file per game snapshot:
 
@@ -160,4 +172,5 @@ With `--lang en-US --indent 2` the result is byte-for-byte identical to the
 
 ## License
 
-This tool is licensed with CC0 1.0 Universal, see full text in [LICENSE](LICENSE).
+This tool is licensed with CC0 1.0 Universal, see full text in
+[LICENSE](LICENSE).
