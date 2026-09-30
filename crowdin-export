@@ -190,6 +190,15 @@ def output_name(language):
     return language.replace("-", "_").lower() + ".json"
 
 
+def render(result, indent):
+    """Serialise the table the way the game writes its language files.
+
+    A flat UTF-8 object without \\uXXXX escapes and with a line feed after the
+    closing brace, like the en_us.json shipped inside the client jar.
+    """
+    return json.dumps(result, ensure_ascii=False, indent=indent) + "\n"
+
+
 # --------------------------------------------------------------------------
 # export
 # --------------------------------------------------------------------------
@@ -231,13 +240,14 @@ def pick_file(api, project_id, requested):
     return files[0]
 
 
-def export(api, project, file_info, language, top_voted):
+def export(api, project, file_info, language, top_voted, verbose=True):
     project_id = project["id"]
     file_id = file_info["id"]
     source_language = project["sourceLanguageId"]
     is_source = language == source_language
 
-    print("strings   : fetching %s" % file_info["path"], file=sys.stderr)
+    if verbose:
+        print("strings   : fetching %s" % file_info["path"], file=sys.stderr)
     strings = sorted((entry["data"] for entry in
                       api.get_all("/projects/%s/strings" % project_id,
                                   {"fileId": file_id}, label="strings")),
@@ -322,7 +332,8 @@ def main(argv=None):
     parser.add_argument("--out", "-o",
                         help="output file, '-' for stdout (default: <language>.json, e.g. zh_cn.json)")
     parser.add_argument("--indent", type=int, default=4,
-                        help="JSON indentation (default: 4, like the game's localisation files)")
+                        help="JSON indentation, 2 matches en_us.json inside client.jar "
+                             "(default: 4, like the localisation files from the asset server)")
     parser.add_argument("--sort", action="store_true",
                         help="sort keys byte-wise instead of keeping the source file order")
     parser.add_argument("--jobs", "-j", type=int, default=DEFAULT_JOBS,
@@ -357,17 +368,17 @@ def main(argv=None):
         language = normalise_language(args.lang, project)
 
         file_info = pick_file(api, project_id, args.file)
-        result, stats = export(api, project, file_info, language, args.top_voted)
+        result, stats = export(api, project, file_info, language, args.top_voted, verbose)
 
         if args.sort:
             result = {key: result[key] for key in sorted(result)}
 
         out_path = args.out if args.out is not None else output_name(language)
-        payload = json.dumps(result, ensure_ascii=False, indent=args.indent)
+        payload = render(result, args.indent)
         if out_path == "-":
-            print(payload)
+            sys.stdout.write(payload)
         else:
-            with open(out_path, "w", encoding="utf-8") as fh:
+            with open(out_path, "w", encoding="utf-8", newline="") as fh:
                 fh.write(payload)
 
         if verbose:

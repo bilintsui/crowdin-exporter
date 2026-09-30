@@ -45,7 +45,7 @@ which is what the not-yet-proofread part of a language looks like.
 | `--out`, `-o` | output file, `-` for stdout (default: `<language>.json`) |
 | `--project` | project id or identifier (default: `minecraft`) |
 | `--file` | file id or path (default: the only file of the project) |
-| `--indent` | JSON indentation (default: 4, like the game's localisation files) |
+| `--indent` | JSON indentation: 4 like the localisation files from the asset server, 2 like `en_us.json` inside `client.jar` |
 | `--sort` | sort keys byte-wise instead of keeping the source file order |
 | `--jobs`, `-j` | parallel API requests, at most 20 (default: 16) |
 | `--list-languages` | print the project's languages and exit |
@@ -66,6 +66,22 @@ and exits with status 1 — log in again and re-export the cookie file.
 
 The cookie file is a credential: keep it out of version control (see
 `.gitignore`) and out of shared directories.
+
+## Output format
+
+The file is written the way the game writes its language files, with no options
+to get it wrong:
+
+* flat JSON object, one `"key": "value"` per line, in source-file order;
+* UTF-8 without BOM and without `\uXXXX` escapes — CJK text stays literal;
+* LF line endings, and a line feed after the closing `}` (like `en_us.json`
+  inside `client.jar`);
+* 4-space indentation, matching the localisation files served by the Mojang
+  asset server (`zh_cn.json`, …); `--indent 2` matches `en_us.json` inside
+  `client.jar` instead.
+
+With `--lang en-US --indent 2` the result is byte-for-byte identical to the
+`en_us.json` inside `client.jar` apart from the key order.
 
 ## Notes
 
