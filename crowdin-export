@@ -83,12 +83,18 @@ def format_duration(seconds):
     return "%dh %02dm" % (seconds // 3600, (seconds % 3600) // 60)
 
 
+def format_time(timestamp):
+    """A timestamp on the user's own clock, with its zone when one is known."""
+    local = time.localtime(timestamp)
+    zone = time.strftime("%Z", local)
+    return time.strftime("%Y-%m-%d %H:%M:%S", local) + (" " + zone if zone else "")
+
+
 def report_cookie_lifetime(expiry, warn_below=600):
     """Say how long the session token is still good for, before any waiting."""
     remaining = expiry - time.time()
-    print("cookies   : session token valid for another %s (expires %s UTC)"
-          % (format_duration(remaining), time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(expiry))),
-          file=sys.stderr)
+    print("cookies   : session token valid for another %s (expires %s)"
+          % (format_duration(remaining), format_time(expiry)), file=sys.stderr)
     if remaining < warn_below:
         print("warning   : a full export takes about a minute; refresh the cookies "
               "if this run may outlast the token", file=sys.stderr)
@@ -372,9 +378,8 @@ def main(argv=None):
         expiry = jwt_expiry(token)
         if expiry and expiry < time.time():
             raise CrowdinError(
-                "the Crowdin session cookie expired at %s UTC\n"
-                "log in to crowdin.com again and re-export the cookies"
-                % time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(expiry)))
+                "the Crowdin session cookie expired at %s\n"
+                "log in to crowdin.com again and re-export the cookies" % format_time(expiry))
         if verbose and expiry:
             report_cookie_lifetime(expiry)
 

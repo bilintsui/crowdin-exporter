@@ -62,10 +62,11 @@ deliberately no default path, so the file is never picked up by accident. Any
 file with a `token` line for a `crowdin.com` domain works.
 
 That token is a short-lived JWT (a few hours). Every run starts by printing how
-long it is still good for, and adds a warning when it is about to run out:
+long it is still good for, on your own clock, and adds a warning when it is
+about to run out:
 
 ```
-cookies   : session token valid for another 1h 59m (expires 2026-09-30 12:24:33 UTC)
+cookies   : session token valid for another 1h 59m (expires 2026-09-30 20:24:33 HKT)
 warning   : a full export takes about a minute; refresh the cookies if this run may outlast the token
 ```
 
