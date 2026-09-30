@@ -26,10 +26,14 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-API_BASE = "https://crowdin.com/api/v2"
+API_BASE = "https://crowdin.com/api/v2"            # session cookie (web app API)
+API_BASE_TOKEN = "https://api.crowdin.com/api/v2"   # personal access token (public API)
 PAGE_SIZE = 250          # 500 is allowed but each page then costs ~40s server side
 DEFAULT_JOBS = 16        # Crowdin allows 20 concurrent requests per account
 DEFAULT_PROJECT = "minecraft"
+DEFAULT_TOKEN_FILE = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+    "crowdin-exporter", "token")
 
 
 class CrowdinError(Exception):
@@ -60,6 +64,17 @@ def read_token(cookies_path):
         raise CrowdinError(
             "no 'token' cookie for crowdin.com in %s\n"
             "log in to crowdin.com in a browser and export the cookies again" % cookies_path)
+    return token
+
+
+def read_token_file(path):
+    """Return a personal access token stored in a file."""
+    if not os.path.isfile(path):
+        raise CrowdinError("token file not found: %s" % path)
+    with open(path, "r", encoding="utf-8") as fh:
+        token = fh.read().strip()
+    if not token:
+        raise CrowdinError("token file is empty: %s" % path)
     return token
 
 
@@ -105,13 +120,14 @@ def report_cookie_lifetime(expiry, warn_below=600):
 # --------------------------------------------------------------------------
 
 class Crowdin:
-    def __init__(self, token, jobs=12, verbose=True):
+    def __init__(self, token, jobs=12, verbose=True, base=API_BASE):
         self.token = token
         self.jobs = jobs
         self.verbose = verbose
+        self.base = base.rstrip("/")
 
     def _request(self, path, params=None, tries=6):
-        url = API_BASE + path
+        url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         last_error = None
@@ -128,10 +144,15 @@ class Crowdin:
                 last_error = error
                 if error.code == 401:
                     raise CrowdinError(
-                        "Crowdin rejected the token (HTTP 401) - the cookie has expired.\n"
-                        "log in to crowdin.com again and re-export the cookies.")
+                        "Crowdin rejected the credentials (HTTP 401).\n"
+                        "a session cookie only lives for an hour, and a personal access token\n"
+                        "can be revoked or lack the scopes the export needs")
                 if error.code == 403:
-                    raise CrowdinError("Crowdin denied access (HTTP 403) to %s" % path)
+                    raise CrowdinError(
+                        "Crowdin denied access (HTTP 403) to %s\n"
+                        "with a personal access token this usually means a missing scope: the\n"
+                        "export needs Projects, Source files & strings, Translations and\n"
+                        "Translation status, all read only" % path)
                 if error.code == 404:
                     raise CrowdinError("not found (HTTP 404): %s" % path)
                 if error.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
@@ -341,8 +362,8 @@ def main(argv=None):
         description="Export one language of a Crowdin project as a game-style lang JSON.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  ./crowdin-export --cookies cookies.txt --lang zh-CN
-  ./crowdin-export --cookies cookies.txt --lang zh-TW --top-voted
+  ./crowdin-export --token-file ~/.config/crowdin-exporter/token --lang zh-CN
+  ./crowdin-export --token-file ~/.config/crowdin-exporter/token --lang zh-TW --top-voted
   ./crowdin-export --cookies cookies.txt --lang lzh --out lzh.json
 """)
     parser.add_argument("--lang", "-l",
@@ -350,8 +371,13 @@ def main(argv=None):
     parser.add_argument("--top-voted", "-t", action="store_true",
                         help="strings without an approved translation use the top-voted "
                              "translation instead of the source text")
-    parser.add_argument("--cookies", required=True,
-                        help="Netscape cookie file with the crowdin.com session cookies")
+    parser.add_argument("--cookies",
+                        help="Netscape cookie file with crowdin.com session cookies (expire after an hour)")
+    parser.add_argument("--token",
+                        help="Crowdin personal access token (long lived)")
+    parser.add_argument("--token-file", default=None,
+                        help="file holding a personal access token (default: $CROWDIN_TOKEN_FILE, "
+                             "else %s when it exists)" % DEFAULT_TOKEN_FILE)
     parser.add_argument("--project", default=DEFAULT_PROJECT,
                         help="Crowdin project id or identifier (default: %s)" % DEFAULT_PROJECT)
     parser.add_argument("--file",
@@ -367,23 +393,40 @@ def main(argv=None):
                         help="parallel API requests, at most 20 (default: %d)" % DEFAULT_JOBS)
     parser.add_argument("--list-languages", action="store_true",
                         help="print the project's target languages and exit")
+    parser.add_argument("--api-base", default=None,
+                        help="override the API endpoint (default: %s for a token, %s for cookies)"
+                             % (API_BASE_TOKEN, API_BASE))
     parser.add_argument("--quiet", "-q", action="store_true", help="no progress output")
     args = parser.parse_args(argv)
     if not args.lang and not args.list_languages:
         parser.error("the following arguments are required: --lang/-l")
-
     verbose = not args.quiet
     try:
-        token = read_token(args.cookies)
-        expiry = jwt_expiry(token)
-        if expiry and expiry < time.time():
-            raise CrowdinError(
-                "the Crowdin session cookie expired at %s\n"
-                "log in to crowdin.com again and re-export the cookies" % format_time(expiry))
-        if verbose and expiry:
-            report_cookie_lifetime(expiry)
+        if args.token:
+            token, base, expiry = args.token.strip(), API_BASE_TOKEN, None
+        elif args.token_file:
+            token, base, expiry = read_token_file(args.token_file), API_BASE_TOKEN, None
+        elif os.environ.get("CROWDIN_TOKEN"):
+            token, base, expiry = os.environ["CROWDIN_TOKEN"].strip(), API_BASE_TOKEN, None
+        elif os.path.isfile(DEFAULT_TOKEN_FILE):
+            token, base, expiry = read_token_file(DEFAULT_TOKEN_FILE), API_BASE_TOKEN, None
+        elif args.cookies:
+            token, base = read_token(args.cookies), API_BASE
+            expiry = jwt_expiry(token)
+            if expiry and expiry < time.time():
+                raise CrowdinError(
+                    "the Crowdin session cookie expired at %s\n"
+                    "log in to crowdin.com again and re-export the cookies" % format_time(expiry))
+            if verbose and expiry:
+                report_cookie_lifetime(expiry)
+        else:
+            parser.error("no credentials: pass --token-file, --token or --cookies, "
+                         "or set CROWDIN_TOKEN")
 
-        api = Crowdin(token, jobs=max(1, args.jobs), verbose=verbose)
+        if verbose and base == API_BASE_TOKEN:
+            print("token     : personal access token (long lived, no expiry to check)", file=sys.stderr)
+
+        api = Crowdin(token, jobs=max(1, args.jobs), verbose=verbose, base=args.api_base or base)
         project = resolve_project(api, args.project)
         project_id = project["id"]
 

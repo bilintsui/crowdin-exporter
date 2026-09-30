@@ -39,7 +39,9 @@ which is what the not-yet-proofread part of a language looks like.
 
 | option | meaning |
 | --- | --- |
-| `--cookies` | **required**: Netscape cookie file with the crowdin.com session cookies |
+| `--token-file` | file holding a personal access token (default: `$CROWDIN_TOKEN`, else `~/.config/crowdin-exporter/token`) |
+| `--token` | personal access token on the command line |
+| `--cookies` | Netscape cookie file with crowdin.com session cookies (one hour lifetime) |
 | `--lang`, `-l` | Crowdin language code (`zh-CN`, `zh-TW`, `zh-HK`, `lzh`, …); the game spelling (`zh_cn`) works too |
 | `--top-voted`, `-t` | fill unapproved strings with the top-voted translation |
 | `--out`, `-o` | output file, `-` for stdout (default: `<language>.json`) |
@@ -53,17 +55,38 @@ which is what the not-yet-proofread part of a language looks like.
 
 Either `--lang` or `--list-languages` is required.
 
-## Cookies
+## Authentication
 
-The tool authenticates with the `token` cookie of a logged-in crowdin.com
-session. Export the cookies of crowdin.com in Netscape format (for example with
-a “Get cookies.txt” browser extension) and pass the file to `--cookies`; there is
-deliberately no default path, so the file is never picked up by accident. Any
-file with a `token` line for a `crowdin.com` domain works.
+Two ways in, pick whichever suits you:
 
-That token is a short-lived JWT (a few hours). Every run starts by printing how
-long it is still good for, on your own clock, and adds a warning when it is
-about to run out:
+**Personal access token (recommended).** Create one at crowdin.com →
+avatar → **Settings → API → Personal Access Tokens**, with read access to
+*Projects*, *Source files & strings*, *Translations* and *Translation status*
+(optionally restrict it to the Minecraft project under *Granular access*).
+Save it as `~/.config/crowdin-exporter/token` (`chmod 600`) and the tool picks it
+up on its own, or point at it explicitly:
+
+```
+./crowdin-export --token-file ~/.config/crowdin-exporter/token --lang zh-CN
+./crowdin-export --token <token> --lang zh-CN          # or $CROWDIN_TOKEN
+```
+
+Tokens speak to the public API at `https://api.crowdin.com/api/v2` and stay
+valid until revoked.
+
+**Session cookies.** Export the cookies of a logged-in crowdin.com session in
+Netscape format (for example with a “Get cookies.txt” browser extension) and
+pass the file to `--cookies`; there is deliberately no default path, so the file
+is never picked up by accident. Any file with a `token` line for a `crowdin.com`
+domain works. Those sessions talk to `https://crowdin.com/api/v2` and the token
+inside only lives for **an hour**, so this mode means re-exporting cookies all
+the time.
+
+`--api-base` overrides the endpoint if you ever need to.
+
+In cookie mode the session token is a short-lived JWT. Every run starts by
+printing how long it is still good for, on your own clock, and adds a warning
+when it is about to run out:
 
 ```
 cookies   : session token valid for another 1h 59m (expires 2026-09-30 20:24:33 HKT)
@@ -73,7 +96,7 @@ warning   : a full export takes about a minute; refresh the cookies if this run 
 Once it has expired the tool says so and exits with status 1 — log in again and
 re-export the cookie file.
 
-The cookie file is a credential: keep it out of version control (see
+Either credential is a secret: keep it out of version control (see
 `.gitignore`) and out of shared directories.
 
 ## Output format
