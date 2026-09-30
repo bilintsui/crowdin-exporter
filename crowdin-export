@@ -43,6 +43,10 @@ class CrowdinError(Exception):
     """Fatal error reported to the user without a traceback."""
 
 
+class CrowdinNotFound(CrowdinError):
+    """The API answered 404 for the requested object."""
+
+
 # --------------------------------------------------------------------------
 # authentication
 # --------------------------------------------------------------------------
@@ -70,14 +74,36 @@ def read_token(cookies_path):
     return token
 
 
+def clean_token(text):
+    """Trim what a copy-and-paste tends to add around a token."""
+    return text.strip().strip('"').strip("'").strip()
+
+
+def looks_like_cookie_file(text):
+    for line in text.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 7 and fields[5] == "token":
+            return True
+    return False
+
+
 def read_token_file(path):
     """Return a personal access token stored in a file."""
     if not os.path.isfile(path):
         raise CrowdinError("token file not found: %s" % path)
-    with open(path, "r", encoding="utf-8") as fh:
-        token = fh.read().strip()
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        raw = fh.read()
+    if looks_like_cookie_file(raw):
+        raise CrowdinError(
+            "%s looks like a Netscape cookie file, not a token.\n"
+            "pass it with --cookies, or put just the token in this file" % path)
+    token = clean_token(raw)
     if not token:
         raise CrowdinError("token file is empty: %s" % path)
+    if "\n" in token:
+        raise CrowdinError(
+            "token file %s holds %d lines - save the token alone in the file"
+            % (path, len(token.splitlines())))
     return token
 
 
@@ -171,7 +197,7 @@ class Crowdin:
                         "- \"Forbidden\" means the project role lacks the right instead"
                         % (path, ": " + detail if detail else ""))
                 if error.code == 404:
-                    raise CrowdinError("not found (HTTP 404): %s" % path)
+                    raise CrowdinNotFound("not found (HTTP 404): %s" % path)
                 if error.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
                     time.sleep(min(30, 2 ** attempt) + random.random())
                     continue
@@ -386,7 +412,13 @@ def load_strings(api, project_id, file_info, verbose, refresh, cache_ttl,
 def resolve_project(api, reference):
     """Accept either a numeric project id or a project identifier/name."""
     if str(reference).isdigit():
-        return api.get("/projects/%s" % reference)["data"]
+        try:
+            return api.get("/projects/%s" % reference)["data"]
+        except CrowdinNotFound:
+            raise CrowdinError(
+                "project %s not found.\n"
+                "with a personal access token this usually means the token's account is not\n"
+                "a member of that project, or that the id is wrong" % reference)
 
     wanted = str(reference).lower()
     projects = [entry["data"] for entry in api.get_all("/projects")]
@@ -546,14 +578,18 @@ def main(argv=None):
         parser.error("the following arguments are required: --lang/-l")
     verbose = not args.quiet
     try:
+        given = [name for name, value in (("--token", args.token),
+                                           ("--token-file", args.token_file),
+                                           ("--cookies", args.cookies)) if value]
+        if len(given) > 1:
+            parser.error("%s cannot be combined - pick one credential" % " and ".join(given))
+
+        # explicit credentials first, then the environment, then the default
+        # token file, so that an explicit --cookies is never shadowed by it
         if args.token:
-            token, base, expiry = args.token.strip(), API_BASE_TOKEN, None
+            token, base, expiry = clean_token(args.token), API_BASE_TOKEN, None
         elif args.token_file:
             token, base, expiry = read_token_file(args.token_file), API_BASE_TOKEN, None
-        elif os.environ.get("CROWDIN_TOKEN"):
-            token, base, expiry = os.environ["CROWDIN_TOKEN"].strip(), API_BASE_TOKEN, None
-        elif os.path.isfile(DEFAULT_TOKEN_FILE):
-            token, base, expiry = read_token_file(DEFAULT_TOKEN_FILE), API_BASE_TOKEN, None
         elif args.cookies:
             token, base = read_token(args.cookies), API_BASE
             expiry = jwt_expiry(token)
@@ -563,6 +599,10 @@ def main(argv=None):
                     "log in to crowdin.com again and re-export the cookies" % format_time(expiry))
             if verbose and expiry:
                 report_cookie_lifetime(expiry)
+        elif os.environ.get("CROWDIN_TOKEN"):
+            token, base, expiry = clean_token(os.environ["CROWDIN_TOKEN"]), API_BASE_TOKEN, None
+        elif os.path.isfile(DEFAULT_TOKEN_FILE):
+            token, base, expiry = read_token_file(DEFAULT_TOKEN_FILE), API_BASE_TOKEN, None
         else:
             parser.error("no credentials: pass --token-file, --token or --cookies, "
                          "or set CROWDIN_TOKEN")

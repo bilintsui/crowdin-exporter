@@ -113,8 +113,10 @@ warning   : a full export takes about a minute; refresh the cookies if this run 
 Once it has expired the tool says so and exits with status 1 — log in again and
 re-export the cookie file.
 
-Either credential is a secret: keep it out of version control (see
-`.gitignore`) and out of shared directories.
+If several are present the explicit one wins: `--token` / `--token-file` /
+`--cookies`, then `$CROWDIN_TOKEN`, then the default token file. Either
+credential is a secret: keep it out of version control (see `.gitignore`) and
+out of shared directories.
 
 ## Source strings
 
